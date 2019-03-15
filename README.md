@@ -1,6 +1,8 @@
 heapdump14
 ==========
 
+**UPDATE**: Works with go 1.7 format, but tested only when DWARF info was provided; without DWARF info the heapdump cannot show much.
+
 Heap dump reader &amp; visualizer for Go 1.4
 
 You call debug.WriteHeapDump(fd uintptr) to write a heap dump to the given

@@ -50,10 +50,9 @@ func edgeLink(e read.Edge) string {
 func edgeSource(x read.ObjId, e read.Edge) string {
 	s := objLink(x)
 	if e.FieldName != "" {
-		s = fmt.Sprintf("%s.%s", s, e.FieldName)
-	}
-	if e.ToOffset != 0 {
-		s = fmt.Sprintf("%s+%d", s, e.ToOffset)
+		s = fmt.Sprintf("%s.%s: %s", s, e.FieldName, d.Ft(x).Name)
+	} else if e.ToOffset != 0 {
+		s = fmt.Sprintf("%s+%d: %s", s, e.ToOffset, d.Ft(x).Name)
 	}
 	return s
 }
@@ -62,16 +61,28 @@ func edgeSource(x read.ObjId, e read.Edge) string {
 // to represent that pointer.
 func nonheapPtr(b []byte) string {
 	p := readPtr(b)
+	return nonheapAddr(p)
+}
+
+func nonheapAddr(p uint64) string {
 	if p == 0 {
 		return "nil"
+	} else if p >= d.HeapStart && p < d.HeapEnd {
+		return fmt.Sprintf("%x: unknown heap+%x", p, p-d.HeapStart)
 	} else {
+		for _, s := range d.SectionInfo {
+			if p >= s.Start && p < s.End {
+				return fmt.Sprintf("%x: %s+%x", p, s.Name, p-s.Start)
+			}
+		}
 		// TODO: look up symbol in executable
-		return fmt.Sprintf("outsideheap_%x", p)
+		return fmt.Sprintf("%x: outsideheap", p)
 	}
 }
 
 // display field
 type Field struct {
+	Addr  uint64
 	Name  string
 	Typ   string
 	Value string
@@ -91,6 +102,17 @@ func rawBytes(b []byte) string {
 	return v + " | " + html.EscapeString(s)
 }
 
+func dump(bytes []byte) string {
+	str := ""
+	for i, b := range bytes {
+		if i >= 16 {
+			return str
+		}
+		str = fmt.Sprintf("%s%02x&nbsp;", str, b)
+	}
+	return str
+}
+
 // getFields uses the data in b to fill in the values for the given field list.
 // edges is a list of known connecting out edges.
 func getFields(b []byte, fields []read.Field, edges []read.Edge) []Field {
@@ -98,10 +120,11 @@ func getFields(b []byte, fields []read.Field, edges []read.Edge) []Field {
 	off := uint64(0)
 	for _, f := range fields {
 		if f.Offset < off {
-			log.Fatal("out of order fields")
+			log.Fatalf("out of order fields %x < %x", f.Offset, off)
 		}
 		if f.Offset > off {
-			r = append(r, Field{fmt.Sprintf("<font color=LightGray>pad %d</font>", f.Offset-off), "", ""})
+			r = append(r, Field{off, fmt.Sprintf("<font color=LightGray>pad %d</font>", f.Offset-off),
+				"", dump(b[off:f.Offset])})
 			off = f.Offset
 		}
 		var value string
@@ -160,7 +183,7 @@ func getFields(b []byte, fields []read.Field, edges []read.Edge) []Field {
 			typ = "raw bytes"
 			off += 16
 		case read.FieldKindPtr:
-			typ = "*" + f.BaseType
+			typ = "*" + read.PtrName(d, f.Type)
 			// TODO: get ptr base type somehow?  Also for slices,chans.
 			if len(edges) > 0 && edges[0].FromOffset == off {
 				value = edgeLink(edges[0])
@@ -171,7 +194,7 @@ func getFields(b []byte, fields []read.Field, edges []read.Edge) []Field {
 			off += d.PtrSize
 		case read.FieldKindIface:
 			// TODO: the itab part?
-			typ = "interface{...}" + f.BaseType
+			typ = "interface{...} " + read.IfaceName(d, readPtr(b[off:]))
 			if len(edges) > 0 && edges[0].FromOffset == off+d.PtrSize {
 				value = edgeLink(edges[0])
 				edges = edges[1:]
@@ -183,7 +206,7 @@ func getFields(b []byte, fields []read.Field, edges []read.Edge) []Field {
 			off += 2 * d.PtrSize
 		case read.FieldKindEface:
 			// TODO: the type part
-			typ = "interface{}"
+			typ = "interface{} " + read.EfaceName(d, readPtr(b[off:]))
 			if len(edges) > 0 && edges[0].FromOffset == off+d.PtrSize {
 				value = edgeLink(edges[0])
 				edges = edges[1:]
@@ -204,7 +227,7 @@ func getFields(b []byte, fields []read.Field, edges []read.Edge) []Field {
 			value = fmt.Sprintf("%s/%d", value, readPtr(b[off+d.PtrSize:]))
 			off += 2 * d.PtrSize
 		case read.FieldKindSlice:
-			typ = "[]" + f.BaseType
+			typ = "[]" + f.Type.Name()
 			if len(edges) > 0 && edges[0].FromOffset == off {
 				value = edgeLink(edges[0])
 				edges = edges[1:]
@@ -217,22 +240,31 @@ func getFields(b []byte, fields []read.Field, edges []read.Edge) []Field {
 			typ = "raw bytes"
 			value = fmt.Sprintf("... %d elided bytes ...", uint64(len(b))-off)
 			off = uint64(len(b))
+		default:
+			typ = fmt.Sprintf("%d = %v", f.Kind, f.Kind)
 		}
-		r = append(r, Field{f.Name, typ, value})
+		r = append(r, Field{f.Offset, f.Name, typ, value})
 	}
 	if uint64(len(b)) > off {
-		r = append(r, Field{fmt.Sprintf("<font color=LightGray>sizeclass pad %d</font>", uint64(len(b))-off), "", ""})
+		r = append(r, Field{off, fmt.Sprintf("<font color=LightGray>sizeclass pad %d</font>", uint64(len(b))-off), "", ""})
 	}
 	return r
 }
 
 type objInfo struct {
-	Addr      uint64
-	Typ       string
-	Size      uint64
-	Fields    []Field
-	Referrers []string
-	Dominates uint64
+	Addr       uint64
+	Typ        string
+	DataSize   uint64
+	TypeSize   uint64
+	ExtraSize  uint64
+	Instances  []instanceInfo
+	Referrers  []string
+	IDom	   string
+	Dominates  uint64
+}
+
+type instanceInfo struct {
+	Fields []Field
 }
 
 var objTemplate = template.Must(template.New("obj").Parse(`
@@ -253,26 +285,34 @@ border:1px solid grey;
 <body>
 <tt>
 <h2>Object {{printf "%x" .Addr}} : {{.Typ}}</h2>
-<h3>{{.Size}} bytes</h3>
+<h3>Type {{.TypeSize}} bytes, data {{ .DataSize }} bytes, {{ .ExtraSize }} bytes of extra padding</h3>
+{{ range .Instances }}
 <table>
 <tr>
+<td>Address</td>
 <td>Field</td>
 <td>Type</td>
 <td>Value</td>
 </tr>
 {{range .Fields}}
 <tr>
+<td>{{ printf "%x" .Addr}}</td>
 <td>{{.Name}}</td>
 <td>{{.Typ}}</td>
 <td>{{.Value}}</td>
 </tr>
 {{end}}
 </table>
+<br>
+{{end}}
 <h3>Referrers</h3>
 {{range .Referrers}}
 {{.}}
 <br>
 {{end}}
+<h3>Immediate dominator</h3>
+{{ .IDom }}
+<br>
 <h3>Heap dominated by this object</h3>
 {{.Dominates}} bytes
 </tt>
@@ -299,11 +339,18 @@ func objHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	x := read.ObjId(id)
 
-	fld := getFields(d.Contents(x), d.Ft(x).Fields, d.Edges(x))
-	if len(fld) > maxFields {
-		msg := fmt.Sprintf("<font color=Red>elided for display: %d fields</font>", len(fld)-(maxFields-1))
-		fld = fld[:maxFields-1]
-		fld = append(fld, Field{msg, "", ""})
+	ft := d.Ft(x)
+	data := d.Contents(x)
+	instances := make([]instanceInfo, 0, uint64(len(data))/ft.Size)
+	for uint64(len(data)) >= ft.Size {
+		fld := getFields(data[:ft.Size], ft.Fields, d.Edges(x))
+		if len(fld) > maxFields {
+			msg := fmt.Sprintf("<font color=Red>elided for display: %d fields</font>", len(fld)-(maxFields-1))
+			fld = fld[:maxFields-1]
+			fld = append(fld, Field{0, msg, "", ""})
+		}
+		instances = append(instances, instanceInfo{fld})
+		data = data[ft.Size:]
 	}
 
 	ref := getReferrers(x)
@@ -313,12 +360,23 @@ func objHandler(w http.ResponseWriter, r *http.Request) {
 		ref = append(ref, msg)
 	}
 
+	var myIdom string
+	if idom[x] == read.ObjNil {
+		myIdom = "not reachable"
+	} else if int(idom[x]) >= d.NumObjects() {
+		myIdom = "none"
+	} else {
+	    myIdom = objLink(idom[x])
+	}
 	info := objInfo{
 		d.Addr(x),
-		typeLink(d.Ft(x)),
+		typeLink(ft),
 		d.Size(x),
-		fld,
+		ft.Size,
+		uint64(len(data)),
+		instances,
 		ref,
+		myIdom,
 		domsize[x],
 	}
 	if err := objTemplate.Execute(w, info); err != nil {
@@ -379,7 +437,7 @@ func typeHandler(w http.ResponseWriter, r *http.Request) {
 	info.Name = ft.Name
 	info.Size = ft.Size
 	for _, x := range byType[ft.Id].objects {
-		info.Instances = append(info.Instances, objLink(x))
+		info.Instances = append(info.Instances, fmt.Sprintf("%s: %d bytes", objLink(x), d.Size(x)))
 	}
 	if err := typeTemplate.Execute(w, info); err != nil {
 		log.Print(err)
@@ -390,6 +448,7 @@ type hentry struct {
 	Name  string
 	Count int
 	Bytes uint64
+	Dom   uint64
 }
 
 var histoTemplate = template.Must(template.New("histo").Parse(`
@@ -408,21 +467,24 @@ border:1px solid grey;
 <title>Type histogram</title>
 </head>
 <body>
+<a href="/">&lt;&lt; Overview</a><br>
 <tt>
 <table>
 <col align="left">
 <col align="right">
 <col align="right">
 <tr>
-<td>Type</td>
 <td align="right">Count</td>
-<td align="right">Bytes</td>
+<td align="right"><a href="histo?by=bytes">Bytes</a></td>
+<td align="right"><a href="histo?by=dom">Domination</a></td>
+<td>Type</td>
 </tr>
 {{range .}}
 <tr>
-<td>{{.Name}}</td>
 <td align="right">{{.Count}}</td>
 <td align="right">{{.Bytes}}</td>
+<td align="right">{{.Dom}}</td>
+<td>{{.Name}}</td>
 </tr>
 {{end}}
 </table>
@@ -433,6 +495,7 @@ border:1px solid grey;
 
 func histoHandler(w http.ResponseWriter, r *http.Request) {
 	// build sorted list of types
+	by := r.URL.Query()["by"]
 	var s []hentry
 	for id, b := range byType {
 		if b.bytes == 0 {
@@ -440,9 +503,17 @@ func histoHandler(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		ft := d.FTList[id]
-		s = append(s, hentry{typeLink(ft), len(b.objects), b.bytes})
+		dom := uint64(0)
+		for _, o := range b.objects {
+			dom += domsize[o]
+		}
+		s = append(s, hentry{typeLink(ft), len(b.objects), b.bytes, dom})
 	}
-	sort.Sort(ByBytes(s))
+	if by == nil || len(by) == 0 || by[0] == "bytes" {
+		sort.Sort(ByBytes(s))
+	} else if by[0] == "dom" {
+		sort.Sort(ByDom(s))
+	}
 
 	if err := histoTemplate.Execute(w, s); err != nil {
 		log.Print(err)
@@ -455,10 +526,19 @@ func (a ByBytes) Len() int           { return len(a) }
 func (a ByBytes) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a ByBytes) Less(i, j int) bool { return a[i].Bytes > a[j].Bytes }
 
+type ByDom []hentry
+
+func (a ByDom) Len() int           { return len(a) }
+func (a ByDom) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByDom) Less(i, j int) bool { return a[i].Dom > a[j].Dom }
+
+
 type mainInfo struct {
 	HeapSize   uint64
 	HeapUsed   uint64
 	NumObjects int
+	ReachableObjects int
+	ReachableBytes uint64
 }
 
 var mainTemplate = template.Must(template.New("histo").Parse(`
@@ -477,20 +557,39 @@ Heap live: {{.HeapUsed}} bytes
 <br>
 Heap objects: {{.NumObjects}}
 <br>
-<a href="histo">Type Histogram</a>
-<a href="globals">Globals</a>
-<a href="goroutines">Goroutines</a>
-<a href="others">Miscellaneous Roots</a>
+Reachable objects: {{.ReachableObjects}}
+<br>
+Reachable size: {{.ReachableBytes}} bytes
+<br>
+<a href="histo">Type Histogram</a><br>
+<a href="globals">Globals</a><br>
+<a href="goroutines">Goroutines</a><br>
+<a href="others">Miscellaneous Roots</a><br>
+<a href="memory">Memory by address</a><br>
 </tt>
 </body>
 </html>
 `))
 
 func mainHandler(w http.ResponseWriter, r *http.Request) {
-	i := mainInfo{d.HeapEnd - d.HeapStart, d.Memstats.Alloc, d.NumObjects()}
+	reachableObjects := 0
+	reachableBytes := uint64(0)
+	n := d.NumObjects()
+	for i, dom := range domsize {
+		if dom != 0 && i != n {
+			reachableObjects++
+			reachableBytes += d.Size(read.ObjId(i))
+		}
+	}
+	i := mainInfo{d.HeapEnd - d.HeapStart, d.Memstats.Alloc, n, reachableObjects, reachableBytes}
 	if err := mainTemplate.Execute(w, i); err != nil {
 		log.Print(err)
 	}
+}
+
+type globalsinfo struct {
+	Data []Field
+	Bss  []Field
 }
 
 var globalsTemplate = template.Must(template.New("globals").Parse(`
@@ -513,12 +612,34 @@ border:1px solid grey;
 <h2>Global roots</h2>
 <table>
 <tr>
+<td colspan=4>.data section</td>
+</tr>
+<tr>
+<td>Address</td>
 <td>Name</td>
 <td>Type</td>
 <td>Value</td>
 </tr>
-{{range .}}
+{{range .Data}}
 <tr>
+<td>{{printf "%08x" .Addr}}</td>
+<td>{{.Name}}</td>
+<td>{{.Typ}}</td>
+<td>{{.Value}}</td>
+</tr>
+{{end}}
+<tr>
+<td colspan=4>.bss section</td>
+</tr>
+<tr>
+<td>Address</td>
+<td>Name</td>
+<td>Type</td>
+<td>Value</td>
+</tr>
+{{range .Bss}}
+<tr>
+<td>{{printf "%08x" .Addr}}</td>
 <td>{{.Name}}</td>
 <td>{{.Typ}}</td>
 <td>{{.Value}}</td>
@@ -531,11 +652,11 @@ border:1px solid grey;
 `))
 
 func globalsHandler(w http.ResponseWriter, r *http.Request) {
-	var f []Field
-	for _, x := range []*read.Data{d.Data, d.Bss} {
-		f = append(f, getFields(x.Data, x.Fields, x.Edges)...)
+	gi := globalsinfo{
+		getFields(d.Data.Data, d.Data.Fields, d.Data.Edges),
+		getFields(d.Bss.Data, d.Bss.Fields, d.Bss.Edges),
 	}
-	if err := globalsTemplate.Execute(w, f); err != nil {
+	if err := globalsTemplate.Execute(w, gi); err != nil {
 		log.Print(err)
 	}
 }
@@ -581,10 +702,69 @@ func othersHandler(w http.ResponseWriter, r *http.Request) {
 	var f []Field
 	for _, x := range d.Otherroots {
 		for _, e := range x.Edges {
-			f = append(f, Field{x.Description, "unknown", edgeLink(e)})
+			f = append(f, Field{0, x.Description, "unknown", edgeLink(e)})
 		}
 	}
 	if err := othersTemplate.Execute(w, f); err != nil {
+		log.Print(err)
+	}
+}
+
+type meminfo struct {
+	Link string
+	Typ  string
+}
+
+var memoryTemplate = template.Must(template.New("memory").Parse(`
+<html>
+<head>
+<style>
+table
+{
+border-collapse:collapse;
+}
+table, td, th
+{
+border:1px solid grey;
+}
+</style>
+<title>Memory</title>
+</head>
+<body>
+<tt>
+<h2>Memory</h2>
+{{range .}}
+{{.Link}} {{.Typ}}<br>
+{{end}}
+</tt>
+</body>
+</html>
+`))
+
+func memoryHandler(w http.ResponseWriter, r *http.Request) {
+	var m []meminfo
+	start := d.HeapStart
+	startStr, hasStart := r.URL.Query()["start"]
+	if hasStart {
+		tmp, err := strconv.ParseUint(startStr[0], 16, 64)
+		if err == nil {
+			start = tmp
+		}
+	}
+	count := 0
+	prev := read.ObjNil
+	for a := start; a < d.HeapEnd; a += d.PtrSize {
+		x := d.FindObj(a)
+		if x != read.ObjNil && x != prev {
+			m = append(m, meminfo{objLink(x), d.Ft(x).Name})
+			prev = x
+			count++
+			if count >= 10000 {
+				break
+			}
+		}
+	}
+	if err := memoryTemplate.Execute(w, m); err != nil {
 		log.Print(err)
 	}
 }
@@ -781,17 +961,19 @@ border:1px solid grey;
 </head>
 <body>
 <tt>
-<h2>Frame {{.Name}}</h2>
+<h2>Frame {{.Name}} {{ printf "%x" .Addr }}</h2>
 <h3>In {{.Goroutine}}</h3>
 <h3>Variables</h3>
 <table>
 <tr>
+<td>Offset</td>
 <td>Name</td>
 <td>Type</td>
 <td>Value</td>
 </tr>
 {{range .Vars}}
 <tr>
+<td>{{ printf "%x" .Addr }}
 <td>{{.Name}}</td>
 <td>{{.Typ}}</td>
 <td>{{.Value}}</td>
@@ -905,6 +1087,7 @@ func main() {
 	http.HandleFunc("/go", goHandler)
 	http.HandleFunc("/frame", frameHandler)
 	http.HandleFunc("/others", othersHandler)
+	http.HandleFunc("/memory", memoryHandler)
 	http.HandleFunc("/heapdump", heapdumpHandler)
 	if err := http.ListenAndServe(*httpAddr, nil); err != nil {
 		log.Fatal(err)
@@ -920,17 +1103,58 @@ var ref1 []read.ObjId
 var ref2 map[read.ObjId][]read.ObjId
 
 func getReferrers(x read.ObjId) []string {
+	return getNReferrers(x, 0, true)
+}
+
+const maxDepth = 0 // disabled
+
+func getNReferrers(x read.ObjId, depth int, fulltext bool) []string {
 	var r []string
+	addr := d.Addr(x)
+	end := addr + d.Size(x)
+	refAddr := make([]uint64, 0, 16)
 	if y := ref1[x]; y != read.ObjNil {
 		for _, e := range d.Edges(y) {
 			if e.To == x {
+				refAddr = append(refAddr, d.Addr(y) + e.FromOffset)
 				r = append(r, edgeSource(y, e))
+				if depth < maxDepth {
+					for _, ref := range getNReferrers(y, depth + 1, false) {
+						r = append(r, "-------&nbsp;" + ref)
+					}
+				}
 			}
 		}
 		for _, y := range ref2[x] {
 			for _, e := range d.Edges(y) {
 				if e.To == x {
+					refAddr = append(refAddr, d.Addr(y) + e.FromOffset)
 					r = append(r, edgeSource(y, e))
+					if depth < maxDepth {
+						for _, ref := range getNReferrers(y, depth + 1, false) {
+							r = append(r, "-------&nbsp;" + ref)
+						}
+					}
+				}
+			}
+		}
+	}
+	if fulltext {
+		numObjects := d.NumObjects()
+		for i := 0; i < numObjects; i++ {
+			objId := read.ObjId(i)
+			contents := d.Contents(objId)
+			scanObjs: for a := uint64(0); a+d.PtrSize <= uint64(len(contents)); a += d.PtrSize {
+				p := readPtr(contents[a:])
+				if p >= addr && p < end {
+					for _, ref := range refAddr {
+						if ref == d.Addr(objId) + a {
+							// Ignore objects in edges
+							continue scanObjs
+						}
+					}
+					r = append(r, objLink(objId)+
+						fmt.Sprintf("+%x/%x -> %x+%x (fulltext objects)", a, d.Ft(objId).Size, addr, p-addr))
 				}
 			}
 		}
@@ -940,13 +1164,48 @@ func getReferrers(x read.ObjId) []string {
 			if e.To != x {
 				continue
 			}
-			r = append(r, "global "+e.FieldName)
+			refAddr = append(refAddr, s.Addr + e.FromOffset)
+			if e.FieldName != "" {
+				r = append(r, "global "+e.FieldName)
+			} else {
+				r = append(r, nonheapAddr(s.Addr+e.FromOffset))
+			}
+		}
+		if fulltext {
+			scanSections: for a := uint64(0); a+d.PtrSize <= uint64(len(s.Data)); a += d.PtrSize {
+				p := readPtr(s.Data[a:])
+				if p >= addr && p < end {
+					for _, ref := range refAddr {
+						if ref == s.Addr + a {
+							// Ignore objects in edges
+							continue scanSections
+						}
+					}
+					r = append(r, nonheapAddr(s.Addr+a)+fmt.Sprintf(" -> %x+%x (fulltext globals)", addr, p-addr))
+				}
+			}
 		}
 	}
 	for _, f := range d.Frames {
 		for _, e := range f.Edges {
 			if e.To == x {
+				refAddr = append(refAddr, f.Addr + e.FromOffset)
 				r = append(r, fmt.Sprintf("<a href=frame?id=%x&depth=%d>%s</a>.%s", f.Addr, f.Depth, f.Name, e.FieldName))
+			}
+		}
+		if fulltext {
+			scanFrames: for a := uint64(0); a+d.PtrSize <= uint64(len(f.Data)); a += d.PtrSize {
+				p := readPtr(f.Data[a:])
+				if p >= addr && p < end {
+					for _, ref := range refAddr {
+						if ref == f.Addr + a {
+							// Ignore objects in edges
+							continue scanFrames
+						}
+					}
+					r = append(r, fmt.Sprintf("<a href=frame?id=%x&depth=%d>%s+%x</a> -> %x+%x (fulltext frames)",
+						f.Addr, f.Depth, f.Name, a, addr, p-addr))
+				}
 			}
 		}
 	}
@@ -955,6 +1214,21 @@ func getReferrers(x read.ObjId) []string {
 			if e.To == x {
 				r = append(r, s.Description)
 			}
+		}
+	}
+	for _, f := range d.Finalizers {
+		if f.Obj >= addr && f.Obj < end {
+			r = append(r, "Some finalizer")
+		}
+	}
+	for _, f := range d.QFinal {
+		if f.Obj >= addr && f.Obj < end {
+			r = append(r, "Queued finalizer")
+		}
+	}
+	for _, d := range d.Defers {
+		if d.Argp >= addr && d.Argp < end {
+			r = append(r, "Defer")
 		}
 	}
 	return r
@@ -1010,6 +1284,8 @@ func prepare() {
 
 // map from object ID to the size of the heap that is dominated by that object.
 var domsize []uint64
+// immediate dominator, indexed by ObjId
+var idom []read.ObjId
 
 func dom() {
 	fmt.Println("Computing dominators...")
@@ -1080,7 +1356,7 @@ func dom() {
 
 	// compute immediate dominators
 	// http://www.hipersoft.rice.edu/grads/publications/dom14.pdf
-	idom := make([]read.ObjId, n+1)
+	idom = make([]read.ObjId, n+1)
 	for i := 0; i < n; i++ {
 		idom[i] = read.ObjNil
 	}
