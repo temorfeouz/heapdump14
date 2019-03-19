@@ -687,7 +687,7 @@ func rawRead(filename string) *Dump {
 				d.TypeMap[typ.Addr] = typ
 				d.Types = append(d.Types, typ)
 			}
-			//fmt.Printf("type %x\n", typ.Addr)
+			// fmt.Printf("type %s %x\n", typ.Name, typ.Addr)
 		case tagGoRoutine:
 			g := &GoRoutine{}
 			g.Addr = readUint64(r)
@@ -864,8 +864,6 @@ func rawRead(filename string) *Dump {
 			log.Fatalf("unknown record kind %d at offset 0x%08x", kind, r.Count())
 		}
 	}
-	// TODO: any easy way to truncate the objects array?  We could
-	// reclaim the fraction that append() added but we didn't need.
 }
 
 func getDwarf(execname string) *dwarf.Data {
@@ -1667,7 +1665,7 @@ func typePropagate(d *Dump, execname string) {
 
 			for _, arg := range layouts[r.Name].args {
 				// log.Printf("  arg %s/%s @ %x", r.Name, arg.name, arg.offset)
-				if arg.offset < uint64(len(r.Parent.Data)) {
+				if arg.offset + arg.type_.Size() < uint64(len(r.Parent.Data)) {
 					scanType(&pc, r.Parent.Addr+arg.offset, r.Parent.Data[arg.offset:arg.offset+arg.type_.Size()], arg.type_)
 				}
 			}
