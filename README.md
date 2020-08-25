@@ -2,6 +2,7 @@ heapdump14
 ==========
 
 **UPDATE**: Works with go 1.7 format, but tested only when DWARF info was provided; without DWARF info the heapdump cannot show much.
+**UPDATE**: fix dependencies, all compiles ok
 
 Heap dump reader &amp; visualizer for Go 1.4
 

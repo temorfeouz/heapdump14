@@ -13,7 +13,7 @@ import (
 	"strconv"
 	"text/template"
 
-	"github.com/randall77/heapdump14/read"
+	"github.com/rvansa/heapdump14/read"
 )
 
 const (
@@ -252,15 +252,15 @@ func getFields(b []byte, fields []read.Field, edges []read.Edge) []Field {
 }
 
 type objInfo struct {
-	Addr       uint64
-	Typ        string
-	DataSize   uint64
-	TypeSize   uint64
-	ExtraSize  uint64
-	Instances  []instanceInfo
-	Referrers  []string
-	IDom	   string
-	Dominates  uint64
+	Addr      uint64
+	Typ       string
+	DataSize  uint64
+	TypeSize  uint64
+	ExtraSize uint64
+	Instances []instanceInfo
+	Referrers []string
+	IDom      string
+	Dominates uint64
 }
 
 type instanceInfo struct {
@@ -366,7 +366,7 @@ func objHandler(w http.ResponseWriter, r *http.Request) {
 	} else if int(idom[x]) >= d.NumObjects() {
 		myIdom = "none"
 	} else {
-	    myIdom = objLink(idom[x])
+		myIdom = objLink(idom[x])
 	}
 	info := objInfo{
 		d.Addr(x),
@@ -532,13 +532,12 @@ func (a ByDom) Len() int           { return len(a) }
 func (a ByDom) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a ByDom) Less(i, j int) bool { return a[i].Dom > a[j].Dom }
 
-
 type mainInfo struct {
-	HeapSize   uint64
-	HeapUsed   uint64
-	NumObjects int
+	HeapSize         uint64
+	HeapUsed         uint64
+	NumObjects       int
 	ReachableObjects int
-	ReachableBytes uint64
+	ReachableBytes   uint64
 }
 
 var mainTemplate = template.Must(template.New("histo").Parse(`
@@ -1116,11 +1115,11 @@ func getNReferrers(x read.ObjId, depth int, fulltext bool) []string {
 	if y := ref1[x]; y != read.ObjNil {
 		for _, e := range d.Edges(y) {
 			if e.To == x {
-				refAddr = append(refAddr, d.Addr(y) + e.FromOffset)
+				refAddr = append(refAddr, d.Addr(y)+e.FromOffset)
 				r = append(r, edgeSource(y, e))
 				if depth < maxDepth {
-					for _, ref := range getNReferrers(y, depth + 1, false) {
-						r = append(r, "-------&nbsp;" + ref)
+					for _, ref := range getNReferrers(y, depth+1, false) {
+						r = append(r, "-------&nbsp;"+ref)
 					}
 				}
 			}
@@ -1128,11 +1127,11 @@ func getNReferrers(x read.ObjId, depth int, fulltext bool) []string {
 		for _, y := range ref2[x] {
 			for _, e := range d.Edges(y) {
 				if e.To == x {
-					refAddr = append(refAddr, d.Addr(y) + e.FromOffset)
+					refAddr = append(refAddr, d.Addr(y)+e.FromOffset)
 					r = append(r, edgeSource(y, e))
 					if depth < maxDepth {
-						for _, ref := range getNReferrers(y, depth + 1, false) {
-							r = append(r, "-------&nbsp;" + ref)
+						for _, ref := range getNReferrers(y, depth+1, false) {
+							r = append(r, "-------&nbsp;"+ref)
 						}
 					}
 				}
@@ -1144,11 +1143,12 @@ func getNReferrers(x read.ObjId, depth int, fulltext bool) []string {
 		for i := 0; i < numObjects; i++ {
 			objId := read.ObjId(i)
 			contents := d.Contents(objId)
-			scanObjs: for a := uint64(0); a+d.PtrSize <= uint64(len(contents)); a += d.PtrSize {
+		scanObjs:
+			for a := uint64(0); a+d.PtrSize <= uint64(len(contents)); a += d.PtrSize {
 				p := readPtr(contents[a:])
 				if p >= addr && p < end {
 					for _, ref := range refAddr {
-						if ref == d.Addr(objId) + a {
+						if ref == d.Addr(objId)+a {
 							// Ignore objects in edges
 							continue scanObjs
 						}
@@ -1164,7 +1164,7 @@ func getNReferrers(x read.ObjId, depth int, fulltext bool) []string {
 			if e.To != x {
 				continue
 			}
-			refAddr = append(refAddr, s.Addr + e.FromOffset)
+			refAddr = append(refAddr, s.Addr+e.FromOffset)
 			if e.FieldName != "" {
 				r = append(r, "global "+e.FieldName)
 			} else {
@@ -1172,11 +1172,12 @@ func getNReferrers(x read.ObjId, depth int, fulltext bool) []string {
 			}
 		}
 		if fulltext {
-			scanSections: for a := uint64(0); a+d.PtrSize <= uint64(len(s.Data)); a += d.PtrSize {
+		scanSections:
+			for a := uint64(0); a+d.PtrSize <= uint64(len(s.Data)); a += d.PtrSize {
 				p := readPtr(s.Data[a:])
 				if p >= addr && p < end {
 					for _, ref := range refAddr {
-						if ref == s.Addr + a {
+						if ref == s.Addr+a {
 							// Ignore objects in edges
 							continue scanSections
 						}
@@ -1189,16 +1190,17 @@ func getNReferrers(x read.ObjId, depth int, fulltext bool) []string {
 	for _, f := range d.Frames {
 		for _, e := range f.Edges {
 			if e.To == x {
-				refAddr = append(refAddr, f.Addr + e.FromOffset)
+				refAddr = append(refAddr, f.Addr+e.FromOffset)
 				r = append(r, fmt.Sprintf("<a href=frame?id=%x&depth=%d>%s</a>.%s", f.Addr, f.Depth, f.Name, e.FieldName))
 			}
 		}
 		if fulltext {
-			scanFrames: for a := uint64(0); a+d.PtrSize <= uint64(len(f.Data)); a += d.PtrSize {
+		scanFrames:
+			for a := uint64(0); a+d.PtrSize <= uint64(len(f.Data)); a += d.PtrSize {
 				p := readPtr(f.Data[a:])
 				if p >= addr && p < end {
 					for _, ref := range refAddr {
-						if ref == f.Addr + a {
+						if ref == f.Addr+a {
 							// Ignore objects in edges
 							continue scanFrames
 						}
@@ -1284,6 +1286,7 @@ func prepare() {
 
 // map from object ID to the size of the heap that is dominated by that object.
 var domsize []uint64
+
 // immediate dominator, indexed by ObjId
 var idom []read.ObjId
 
