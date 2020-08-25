@@ -187,10 +187,10 @@ type Edge struct {
 // object represents an object in the heap.
 // There will be a lot of these.  They need to be small.
 type object struct {
-	Ft         *FullType
-	offset     int64 // position of object contents in dump file
-	Addr       uint64
-	Size       uint64 // original size in the dump
+	Ft     *FullType
+	offset int64 // position of object contents in dump file
+	Addr   uint64
+	Size   uint64 // original size in the dump
 }
 
 type ObjId int
@@ -251,7 +251,7 @@ func (d *Dump) Edges(i ObjId) []Edge {
 	x := &d.objects[i]
 	e := d.edges[:0]
 	b := d.Contents(i)
-	if (x.Ft.Type != nil) {
+	if x.Ft.Type != nil {
 		instanceOffset := uint64(0)
 		for uint64(len(b)) >= x.Ft.Type.Size() {
 			for _, f := range x.Ft.Type.dwarfFields() {
@@ -1019,14 +1019,12 @@ func (t *dwarfPtrType) dwarfFields() []dwarfTypeMember {
 var dwarfCodePtr dwarfType = &dwarfBaseType{dwarfTypeImpl{"<codeptr>", 8, nil, nil}, dw_ate_unsigned}
 var dwarfFunc dwarfType = &dwarfPtrType{dwarfTypeImpl{"*<closure>", 8, nil, nil}, dwarfCodePtr}
 
-
 func (t *dwarfFuncType) dwarfFields() []dwarfTypeMember {
 	if t.dFields == nil {
 		t.dFields = append(t.dFields, dwarfTypeMember{0, "", dwarfFunc})
 	}
 	return t.dFields
 }
-
 
 func (t *dwarfStructType) dwarfFields() []dwarfTypeMember {
 	if t.dFields != nil {
@@ -1317,12 +1315,18 @@ func globalRoots(d *Dump, w *dwarf.Data, t map[dwarf.Offset]dwarfType) []dwarfTy
 		if e.Tag != dwarf.TagVariable {
 			continue
 		}
+		if e.Val(dwarf.AttrName) == nil {
+			continue
+		}
 		name := e.Val(dwarf.AttrName).(string)
 		typ := t[e.Val(dwarf.AttrType).(dwarf.Offset)]
 		var loc uint64
 		if sigLoc, ok := e.Val(dwarf.AttrLocation).(int64); ok {
 			loc = uint64(sigLoc)
 		} else {
+			if e.Val(dwarf.AttrLocation) == nil {
+				continue
+			}
 			locexpr := e.Val(dwarf.AttrLocation).([]uint8)
 			if len(locexpr) == 0 || locexpr[0] != dw_op_addr {
 				continue
@@ -1369,10 +1373,22 @@ func frameLayouts(d *Dump, w *dwarf.Data, t map[dwarf.Offset]dwarfType) map[stri
 				locals = nil
 				args = nil
 			}
+			if e.Val(dwarf.AttrName) == nil {
+				continue
+			}
 			funcname = e.Val(dwarf.AttrName).(string)
 		case dwarf.TagVariable:
+			if e.Val(dwarf.AttrName) == nil {
+				continue
+			}
 			name := e.Val(dwarf.AttrName).(string)
+			if e.Val(dwarf.AttrType) == nil {
+				continue
+			}
 			typ := t[e.Val(dwarf.AttrType).(dwarf.Offset)]
+			if e.Val(dwarf.AttrLocation) == nil {
+				continue
+			}
 			offset, ok := e.Val(dwarf.AttrLocation).(int64)
 			if !ok {
 				loc := e.Val(dwarf.AttrLocation).([]uint8)
@@ -1402,6 +1418,9 @@ func frameLayouts(d *Dump, w *dwarf.Data, t map[dwarf.Offset]dwarfType) map[stri
 			typ := t[e.Val(dwarf.AttrType).(dwarf.Offset)]
 			offset, ok := e.Val(dwarf.AttrLocation).(int64)
 			if !ok {
+				if e.Val(dwarf.AttrLocation) == nil {
+					continue
+				}
 				loc := e.Val(dwarf.AttrLocation).([]uint8)
 				if len(loc) == 0 {
 					continue
@@ -1665,7 +1684,7 @@ func typePropagate(d *Dump, execname string) {
 
 			for _, arg := range layouts[r.Name].args {
 				// log.Printf("  arg %s/%s @ %x", r.Name, arg.name, arg.offset)
-				if arg.offset + arg.type_.Size() < uint64(len(r.Parent.Data)) {
+				if arg.offset+arg.type_.Size() < uint64(len(r.Parent.Data)) {
 					scanType(&pc, r.Parent.Addr+arg.offset, r.Parent.Data[arg.offset:arg.offset+arg.type_.Size()], arg.type_)
 				}
 			}
@@ -1762,7 +1781,7 @@ func scanSlice(pc *propagateContext, data []byte, typ dwarfType) {
 func scanSyncPool(pc *propagateContext, data []byte, typ dwarfType) {
 	d := pc.d
 	if typ.Size() != 3*d.PtrSize {
-		log.Fatalf("%s: Unexpected sync.Pool size %d", typ.Name(), typ.Size())
+		//	log.Fatalf("%s: Unexpected sync.Pool size %d", typ.Name(), typ.Size())
 	}
 	local := readPtr(d, data[0:])
 	localSize := readPtr(d, data[d.PtrSize:])
@@ -1924,8 +1943,8 @@ func findTypeName(d *Dump, taddr uint64) string {
 	if strLen < 1 {
 		return ""
 	}
-	end := strOffset+3+strLen
-	if (end > uint64(len(d.runtimeTypes))) {
+	end := strOffset + 3 + strLen
+	if end > uint64(len(d.runtimeTypes)) {
 		log.Printf("Type %x: Name exceeds runtimeTypes, offset %x len %x: %s", taddr, strOffset, strLen,
 			string(d.runtimeTypes[strOffset+4:]))
 		return ""

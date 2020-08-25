@@ -13,7 +13,7 @@ import (
 	"strconv"
 	"text/template"
 
-	"github.com/rvansa/heapdump14/read"
+	"github.com/temorfeouz/heapdump14/read"
 )
 
 const (
@@ -75,6 +75,12 @@ func nonheapAddr(p uint64) string {
 				return fmt.Sprintf("%x: %s+%x", p, s.Name, p-s.Start)
 			}
 		}
+		//if uint64(len(d.Bss.Fields)) <= p {
+		//	return fmt.Sprintf("%+v", d.Bss.Fields[p])
+		//}
+		//for k, v := range d.Bss.Fields {
+		//
+		//}
 		// TODO: look up symbol in executable
 		return fmt.Sprintf("%x: outsideheap", p)
 	}
@@ -108,6 +114,7 @@ func dump(bytes []byte) string {
 		if i >= 16 {
 			return str
 		}
+		return string(bytes)
 		str = fmt.Sprintf("%s%02x&nbsp;", str, b)
 	}
 	return str
@@ -447,7 +454,7 @@ func typeHandler(w http.ResponseWriter, r *http.Request) {
 type hentry struct {
 	Name  string
 	Count int
-	Bytes uint64
+	Bytes string
 	Dom   uint64
 }
 
@@ -504,10 +511,10 @@ func histoHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		ft := d.FTList[id]
 		dom := uint64(0)
-		for _, o := range b.objects {
+		for o, _ := range b.objects {
 			dom += domsize[o]
 		}
-		s = append(s, hentry{typeLink(ft), len(b.objects), b.bytes, dom})
+		s = append(s, hentry{typeLink(ft), len(b.objects), read.BtsToHuman(b.bytes), dom})
 	}
 	if by == nil || len(by) == 0 || by[0] == "bytes" {
 		sort.Sort(ByBytes(s))
@@ -533,11 +540,11 @@ func (a ByDom) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a ByDom) Less(i, j int) bool { return a[i].Dom > a[j].Dom }
 
 type mainInfo struct {
-	HeapSize         uint64
-	HeapUsed         uint64
+	HeapSize         string
+	HeapUsed         string
 	NumObjects       int
 	ReachableObjects int
-	ReachableBytes   uint64
+	ReachableBytes   string
 }
 
 var mainTemplate = template.Must(template.New("histo").Parse(`
@@ -580,7 +587,7 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
 			reachableBytes += d.Size(read.ObjId(i))
 		}
 	}
-	i := mainInfo{d.HeapEnd - d.HeapStart, d.Memstats.Alloc, n, reachableObjects, reachableBytes}
+	i := mainInfo{read.BtsToHuman(d.HeapEnd - d.HeapStart), read.BtsToHuman(d.Memstats.Alloc), n, reachableObjects, read.BtsToHuman(reachableBytes)}
 	if err := mainTemplate.Execute(w, i); err != nil {
 		log.Print(err)
 	}
